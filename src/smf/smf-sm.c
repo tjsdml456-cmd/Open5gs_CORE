@@ -32,6 +32,7 @@
 #include "npcf-handler.h"
 #include "nsmf-handler.h"
 #include "binding.h"
+#include "qos-modify.h"
 
 void smf_state_initial(ogs_fsm_t *s, smf_event_t *e)
 {
@@ -532,6 +533,21 @@ void smf_state_operational(ogs_fsm_t *s, smf_event_t *e)
 
         CASE(OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION)
             SWITCH(sbi_message.h.resource.component[0])
+            CASE("qos-modify")
+                SWITCH(sbi_message.h.method)
+                CASE(OGS_SBI_HTTP_METHOD_POST)
+                    smf_qos_modify_handle_request(stream, &sbi_message, sbi_request);
+                    break;
+                DEFAULT
+                    ogs_error("Invalid HTTP method [%s]", sbi_message.h.method);
+                    ogs_assert(true ==
+                        ogs_sbi_server_send_error(stream,
+                            OGS_SBI_HTTP_STATUS_BAD_REQUEST, &sbi_message,
+                            "Invalid HTTP method", sbi_message.h.method,
+                            NULL));
+                END
+                break;
+
             CASE(OGS_SBI_RESOURCE_NAME_SM_CONTEXTS)
                 SWITCH(sbi_message.h.method)
                 CASE(OGS_SBI_HTTP_METHOD_POST)
@@ -1442,3 +1458,4 @@ void smf_state_operational(ogs_fsm_t *s, smf_event_t *e)
         break;
     }
 }
+

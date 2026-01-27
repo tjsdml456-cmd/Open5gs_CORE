@@ -2373,6 +2373,26 @@ static int parse_json(ogs_sbi_message_t *message,
 
         CASE(OGS_SBI_SERVICE_NAME_NSMF_PDUSESSION)
             SWITCH(message->h.resource.component[0])
+            CASE("qos-modify")
+                /*
+                 * Custom SMF QoS modify API endpoint.
+                 *
+                 * This is a non-standard, implementation-specific resource
+                 * used only by the local SMF (e.g. test scripts) to trigger
+                 * dynamic QoS flow modification.
+                 *
+                 * We intentionally do NOT parse the HTTP body into any
+                 * OpenAPI-generated structure here. The raw JSON payload is
+                 * consumed later by smf_qos_modify_handle_request(), which
+                 * reads request->http.content directly.
+                 *
+                 * To avoid spurious "Unknown resource name [qos-modify]"
+                 * errors and HTTP 400 responses from the generic SBI layer,
+                 * we simply accept this resource name and do nothing in the
+                 * parser – just fall through with rv left untouched.
+                 */
+                break;
+
             CASE(OGS_SBI_RESOURCE_NAME_SM_CONTEXTS)
                 SWITCH(message->h.resource.component[2])
                 CASE(OGS_SBI_RESOURCE_NAME_MODIFY)
@@ -4050,3 +4070,4 @@ void ogs_sbi_discovery_option_clear_hnrf_uri(
     ogs_free(discovery_option->hnrf_uri);
     discovery_option->hnrf_uri = NULL;
 }
+

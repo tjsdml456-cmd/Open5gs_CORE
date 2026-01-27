@@ -52,28 +52,44 @@ static void fill_qos_level_parameters(
     qosCharacteristics->present = NGAP_QosCharacteristics_PR_nonDynamic5QI;
 
     nonDynamic5QI->fiveQI = qos->index;
+    ogs_info("[NGAP-BUILD] fill_qos_level_parameters: 5QI=%d, include_gbr=%d, GBR_DL=%llu, GBR_UL=%llu, MBR_DL=%llu, MBR_UL=%llu",
+            qos->index, include_gbr,
+            (unsigned long long)qos->gbr.downlink,
+            (unsigned long long)qos->gbr.uplink,
+            (unsigned long long)qos->mbr.downlink,
+            (unsigned long long)qos->mbr.uplink);
 
     /* Optional GBR/MBR Information */
-    if (include_gbr &&
-        qos->mbr.downlink && qos->mbr.uplink &&
-        qos->gbr.downlink && qos->gbr.uplink) {
+    /* For GBR QoS flows, include GBR information if at least one GBR value is present */
+    if (include_gbr && (qos->gbr.downlink > 0 || qos->gbr.uplink > 0)) {
         NGAP_GBR_QosInformation_t *gBR_QosInformation =
             params->gBR_QosInformation = CALLOC(1, sizeof(*gBR_QosInformation));
         ogs_assert(gBR_QosInformation);
 
-        ogs_assert(qos->mbr.downlink <= OGS_MAX_BITRATE_NGAP);
-        ogs_assert(qos->mbr.uplink <= OGS_MAX_BITRATE_NGAP);
-        ogs_assert(qos->gbr.downlink <= OGS_MAX_BITRATE_NGAP);
-        ogs_assert(qos->gbr.uplink <= OGS_MAX_BITRATE_NGAP);
+        /* GBR QoS Flow: GBR is mandatory, MBR is optional.
+         * If MBR is not provided, use GBR value as MBR.
+         * If one direction GBR is missing, use 0 or the other direction's value. */
+        uint64_t gbr_dl = qos->gbr.downlink > 0 ? qos->gbr.downlink : 0;
+        uint64_t gbr_ul = qos->gbr.uplink > 0 ? qos->gbr.uplink : 0;
+        uint64_t mbr_dl = qos->mbr.downlink > 0 ? qos->mbr.downlink : gbr_dl;
+        uint64_t mbr_ul = qos->mbr.uplink > 0 ? qos->mbr.uplink : gbr_ul;
 
-        asn_uint642INTEGER(&gBR_QosInformation->maximumFlowBitRateDL,
-                qos->mbr.downlink);
-        asn_uint642INTEGER(&gBR_QosInformation->maximumFlowBitRateUL,
-                qos->mbr.uplink);
+        ogs_assert(mbr_dl <= OGS_MAX_BITRATE_NGAP);
+        ogs_assert(mbr_ul <= OGS_MAX_BITRATE_NGAP);
+        ogs_assert(gbr_dl <= OGS_MAX_BITRATE_NGAP);
+        ogs_assert(gbr_ul <= OGS_MAX_BITRATE_NGAP);
+
+        asn_uint642INTEGER(&gBR_QosInformation->maximumFlowBitRateDL, mbr_dl);
+        asn_uint642INTEGER(&gBR_QosInformation->maximumFlowBitRateUL, mbr_ul);
         asn_uint642INTEGER(&gBR_QosInformation->
-                guaranteedFlowBitRateDL, qos->gbr.downlink);
+                guaranteedFlowBitRateDL, gbr_dl);
         asn_uint642INTEGER(&gBR_QosInformation->
-                guaranteedFlowBitRateUL, qos->gbr.uplink);
+                guaranteedFlowBitRateUL, gbr_ul);
+        
+        ogs_info("[NGAP-BUILD] GBR QoS Information included: GBR_DL=%llu bps, GBR_UL=%llu bps, "
+                 "MBR_DL=%llu bps, MBR_UL=%llu bps",
+                 (unsigned long long)gbr_dl, (unsigned long long)gbr_ul,
+                 (unsigned long long)mbr_dl, (unsigned long long)mbr_ul);
     } else if (include_gbr &&
                (qos->mbr.downlink || qos->mbr.uplink ||
                 qos->gbr.downlink || qos->gbr.uplink)) {
@@ -496,6 +512,13 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
                     QosFlowAddOrModifyRequestItem);
             QosFlowAddOrModifyRequestItem->qosFlowIdentifier = qos_flow->qfi;
 
+            ogs_info("[NGAP-BUILD] Building QoS Flow Modify Request: QFI=%d, 5QI=%d, GBR_DL=%llu, GBR_UL=%llu, MBR_DL=%llu, MBR_UL=%llu",
+                    qos_flow->qfi, qos_flow->qos.index,
+                    (unsigned long long)qos_flow->qos.gbr.downlink,
+                    (unsigned long long)qos_flow->qos.gbr.uplink,
+                    (unsigned long long)qos_flow->qos.mbr.downlink,
+                    (unsigned long long)qos_flow->qos.mbr.uplink);
+
             QosFlowAddOrModifyRequestItem->qosFlowLevelQosParameters =
                     CALLOC(1, sizeof(NGAP_QosFlowLevelQosParameters_t));
             ogs_assert(
@@ -503,6 +526,12 @@ ogs_pkbuf_t *ngap_build_pdu_session_resource_modify_request_transfer(
             fill_qos_level_parameters(
                     QosFlowAddOrModifyRequestItem->qosFlowLevelQosParameters,
                     &qos_flow->qos, include_gbr);
+
+            ogs_info("[NGAP-BUILD] QoS Flow Modify Request built: QFI=%d, 5QI=%ld (in NGAP message)",
+                    qos_flow->qfi,
+                    (long)QosFlowAddOrModifyRequestItem->
+                        qosFlowLevelQosParameters->qosCharacteristics.
+                            choice.nonDynamic5QI->fiveQI);
         }
     }
 
@@ -713,3 +742,4 @@ ogs_pkbuf_t *ngap_build_handover_command_transfer(smf_sess_t *sess)
 
     return ogs_asn_encode(&asn_DEF_NGAP_HandoverCommandTransfer, &message);
 }
+
