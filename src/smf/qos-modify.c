@@ -69,6 +69,15 @@ bool smf_qos_modify_handle_request(
     ogs_assert(message);
     ogs_assert(request);
 
+    /* Debug: log raw incoming body for troubleshooting */
+    if (request->http.content && request->http.content_length > 0) {
+        ogs_info("[QoS-MODIFY] Incoming request body: %.*s",
+                 (int)request->http.content_length,
+                 (const char *)request->http.content);
+    } else {
+        ogs_info("[QoS-MODIFY] Incoming request with empty body");
+    }
+
     /* Parse JSON request body */
     if (!request->http.content || request->http.content_length == 0) {
         ogs_error("No request body");
@@ -92,7 +101,7 @@ bool smf_qos_modify_handle_request(
     /* Parse supi */
     item = cJSON_GetObjectItem(json, "supi");
     if (!item || !cJSON_IsString(item)) {
-        ogs_error("No supi or invalid type");
+        ogs_error("[QoS-MODIFY] No supi or invalid type");
         cJSON_Delete(json);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
@@ -105,7 +114,7 @@ bool smf_qos_modify_handle_request(
     /* Parse psi */
     item = cJSON_GetObjectItem(json, "psi");
     if (!item || !cJSON_IsNumber(item)) {
-        ogs_error("No psi or invalid type");
+        ogs_error("[QoS-MODIFY] No psi or invalid type");
         cJSON_Delete(json);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
@@ -118,7 +127,7 @@ bool smf_qos_modify_handle_request(
     /* Parse qfi */
     item = cJSON_GetObjectItem(json, "qfi");
     if (!item || !cJSON_IsNumber(item)) {
-        ogs_error("No qfi or invalid type");
+        ogs_error("[QoS-MODIFY] No qfi or invalid type");
         cJSON_Delete(json);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
@@ -131,7 +140,7 @@ bool smf_qos_modify_handle_request(
     /* Parse 5qi */
     item = cJSON_GetObjectItem(json, "5qi");
     if (!item || !cJSON_IsNumber(item)) {
-        ogs_error("No 5qi or invalid type");
+        ogs_error("[QoS-MODIFY] No 5qi or invalid type");
         cJSON_Delete(json);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
@@ -171,10 +180,15 @@ bool smf_qos_modify_handle_request(
 
     cJSON_Delete(json);
 
+    ogs_info("[QoS-MODIFY] Parsed JSON: supi=%s psi=%d qfi=%d 5qi=%d gbr_dl=%llu gbr_ul=%llu mbr_dl=%llu mbr_ul=%llu",
+             supi, psi, qfi, five_qi,
+             (unsigned long long)gbr_dl, (unsigned long long)gbr_ul,
+             (unsigned long long)mbr_dl, (unsigned long long)mbr_ul);
+
     /* Find UE by SUPI */
     smf_ue = smf_ue_find_by_supi(supi);
     if (!smf_ue) {
-        ogs_error("UE not found [%s]", supi);
+        ogs_error("[QoS-MODIFY] UE not found [%s]", supi);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
                 OGS_SBI_HTTP_STATUS_NOT_FOUND, NULL,
@@ -189,7 +203,7 @@ bool smf_qos_modify_handle_request(
             break;
     }
     if (!sess || sess->psi != psi) {
-        ogs_error("Session not found [%s:%d]", supi, psi);
+        ogs_error("[QoS-MODIFY] Session not found [%s:%d]", supi, psi);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
                 OGS_SBI_HTTP_STATUS_NOT_FOUND, NULL,
@@ -200,7 +214,7 @@ bool smf_qos_modify_handle_request(
     /* Find QoS Flow by QFI */
     qos_flow = smf_qos_flow_find_by_qfi(sess, qfi);
     if (!qos_flow) {
-        ogs_error("QoS Flow not found [%s:%d:%d]", supi, psi, qfi);
+        ogs_error("[QoS-MODIFY] QoS Flow not found [%s:%d:%d]", supi, psi, qfi);
         ogs_assert(true ==
             ogs_sbi_server_send_error(stream,
                 OGS_SBI_HTTP_STATUS_NOT_FOUND, NULL,
@@ -208,7 +222,7 @@ bool smf_qos_modify_handle_request(
         return false;
     }
 
-    ogs_info("Modifying QoS Flow [%s:%d:%d] 5QI=%d GBR_DL=%llu GBR_UL=%llu MBR_DL=%llu MBR_UL=%llu",
+    ogs_info("[QoS-MODIFY] Modifying QoS Flow [%s:%d:%d] 5QI=%d GBR_DL=%llu GBR_UL=%llu MBR_DL=%llu MBR_UL=%llu",
             supi, psi, qfi, five_qi,
             (unsigned long long)gbr_dl, (unsigned long long)gbr_ul,
             (unsigned long long)mbr_dl, (unsigned long long)mbr_ul);
@@ -216,8 +230,7 @@ bool smf_qos_modify_handle_request(
     /* Update 5QI */
     ogs_info("[QoS-MODIFY] Before update: QFI=%d, 5QI=%d", qfi, qos_flow->qos.index);
     qos_flow->qos.index = five_qi;
-    ogs_info("[QoS-MODIFY] After update: QFI=%d, 5QI=%d (changed from %d to %d)", 
-            qfi, qos_flow->qos.index, qos_flow->qos.index == five_qi ? qos_flow->qos.index : 0, five_qi);
+    ogs_info("[QoS-MODIFY] After update: QFI=%d, 5QI=%d", qfi, qos_flow->qos.index);
 
     /* Update GBR if provided */
     if (has_gbr) {
@@ -318,5 +331,6 @@ bool smf_qos_modify_handle_request(
 
     return true;
 }
+
 
 
