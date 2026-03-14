@@ -373,6 +373,10 @@ void upf_n4_handle_session_modification_request(
     }
     if (cause_value != OGS_PFCP_CAUSE_REQUEST_ACCEPTED)
         goto cleanup;
+    if (i > 0) {
+        ogs_info("[QoS-MODIFY] UPF applied new QoS (PFCP Session Modification, %d QER(s) updated)", i);
+        sess->first_qfi_packet_logged = false; /* next UL packet with new QFI will be logged */
+    }
 
     for (i = 0; i < OGS_MAX_NUM_OF_QER; i++) {
         if (ogs_pfcp_handle_remove_qer(&sess->pfcp, &req->remove_qer[i],
@@ -507,3 +511,4 @@ void upf_n4_handle_session_report_response(
     }
 
 }
+

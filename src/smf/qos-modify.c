@@ -69,6 +69,9 @@ bool smf_qos_modify_handle_request(
     ogs_assert(message);
     ogs_assert(request);
 
+    /* Log the moment SMF first receives QoS information via API (control plane entry) */
+    ogs_info("[QoS-MODIFY] [API-ENTRY] SMF received QoS modify request via API (control plane)");
+    
     /* Debug: log raw incoming body for troubleshooting */
     if (request->http.content && request->http.content_length > 0) {
         ogs_info("[QoS-MODIFY] Incoming request body: %.*s",

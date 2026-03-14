@@ -513,6 +513,13 @@ static void _gtpv1_u_recv_cb(short when, ogs_socket_t fd, void *data)
         sess = UPF_SESS(pdr->sess);
         ogs_assert(sess);
 
+        /* First packet with this QFI after last QoS modification (UL from RAN) */
+        if (pdr->qer && pdr->qer->qfi && !sess->first_qfi_packet_logged) {
+            ogs_info("[QoS-MODIFY] [FIRST-PACKET-UL] First packet with QFI=%d after QoS change (TEID=0x%x)",
+                    pdr->qer->qfi, header_desc.teid);
+            sess->first_qfi_packet_logged = true;
+        }
+
         far = pdr->far;
         ogs_assert(far);
 
@@ -979,3 +986,4 @@ static void upf_gtp_handle_multicast(ogs_pkbuf_t *recvbuf)
         }
     }
 }
+
