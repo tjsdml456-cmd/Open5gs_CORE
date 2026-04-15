@@ -413,7 +413,7 @@ int gsm_handle_pdu_session_modification_qos_flow_descriptions(
         for (j = 0; j < qos_flow_description[i].num_of_parameter; j++) {
             switch(qos_flow_description[i].param[j].identifier) {
             case OGS_NAX_QOS_FLOW_PARAMETER_ID_5QI:
-                /* Nothing */
+                qos_flow->qos.index = qos_flow_description[i].param[j].qos_index;
                 break;
             case OGS_NAX_QOS_FLOW_PARAMETER_ID_GFBR_UPLINK:
                 qos_flow->qos.gbr.uplink = ogs_nas_bitrate_to_uint64(
@@ -433,7 +433,7 @@ int gsm_handle_pdu_session_modification_qos_flow_descriptions(
                 break;
             default:
                 ogs_fatal("Unknown qos_flow parameter identifier [%d]",
-                        qos_flow_description[i].param[i].identifier);
+                        qos_flow_description[i].param[j].identifier);
                 ogs_assert_if_reached();
             }
         }
@@ -542,3 +542,4 @@ cleanup:
 
     return OGS_ERROR;
 }
+
