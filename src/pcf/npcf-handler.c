@@ -21,6 +21,250 @@
 
 #include "npcf-handler.h"
 
+/*
+ * Lab extension for dynamic QoS on an existing QoS flow (AF/iperf via
+ * Npcf_PolicyAuthorization only — no separate PCF API).
+ *
+ * Set ascReqData.afAppId to:
+ *   5GC-QOS:<qfi>:<5qi>[:<gbr_dl>][:<gbr_ul>][:<mbr_dl>][:<mbr_ul>]
+ * Example: 5GC-QOS:1:66:20000000:20000000
+ *
+ * PCF builds SmPolicyDecision (qosDecs "qfi-N" only) and uses the existing
+ * SmPolicyControl update-notify path toward SMF.
+ */
+#define PCF_QOS_TARGET_AF_PREFIX        "5GC-QOS:"
+#define PCF_QOS_TARGET_QOS_ID_PREFIX    "qfi-"
+
+static bool pcf_policyauth_parse_qos_target_af_app_id(
+        const char *af_app_id, uint8_t *qfi, int *five_qi,
+        uint64_t *gbr_dl, uint64_t *gbr_ul,
+        uint64_t *mbr_dl, uint64_t *mbr_ul,
+        bool *has_gbr, bool *has_mbr)
+{
+    unsigned int qfi_u = 0;
+    int n = 0;
+
+    ogs_assert(af_app_id);
+    ogs_assert(qfi);
+    ogs_assert(five_qi);
+    ogs_assert(gbr_dl);
+    ogs_assert(gbr_ul);
+    ogs_assert(mbr_dl);
+    ogs_assert(mbr_ul);
+    ogs_assert(has_gbr);
+    ogs_assert(has_mbr);
+
+    *has_gbr = false;
+    *has_mbr = false;
+    *gbr_dl = *gbr_ul = *mbr_dl = *mbr_ul = 0;
+
+    if (strncmp(af_app_id, PCF_QOS_TARGET_AF_PREFIX,
+                strlen(PCF_QOS_TARGET_AF_PREFIX)) != 0)
+        return false;
+
+    n = sscanf(af_app_id + strlen(PCF_QOS_TARGET_AF_PREFIX),
+            "%u:%d", &qfi_u, five_qi);
+    if (n < 2 || qfi_u == 0)
+        return false;
+
+    *qfi = (uint8_t)qfi_u;
+
+    n = sscanf(af_app_id + strlen(PCF_QOS_TARGET_AF_PREFIX),
+            "%*u:%*d:%llu:%llu:%llu:%llu",
+            (unsigned long long *)gbr_dl,
+            (unsigned long long *)gbr_ul,
+            (unsigned long long *)mbr_dl,
+            (unsigned long long *)mbr_ul);
+    if (n >= 1) {
+        *has_gbr = true;
+        if (n >= 3)
+            *has_mbr = true;
+    }
+
+    return true;
+}
+
+static OpenAPI_qos_data_t *pcf_policyauth_build_qos_target_data(
+        uint8_t qfi, int five_qi,
+        uint64_t gbr_dl, uint64_t gbr_ul, uint64_t mbr_dl, uint64_t mbr_ul,
+        bool has_gbr, bool has_mbr, ogs_qos_t *session_qos)
+{
+    OpenAPI_qos_data_t *QosData = NULL;
+    char qos_id[16];
+
+    ogs_assert(session_qos);
+
+    QosData = ogs_calloc(1, sizeof(*QosData));
+    ogs_assert(QosData);
+
+    ogs_snprintf(qos_id, sizeof(qos_id), "%s%d",
+            PCF_QOS_TARGET_QOS_ID_PREFIX, qfi);
+    QosData->qos_id = ogs_strdup(qos_id);
+    ogs_assert(QosData->qos_id);
+
+    QosData->is__5qi = true;
+    QosData->_5qi = five_qi;
+    QosData->is_priority_level = true;
+    QosData->priority_level = session_qos->arp.priority_level;
+
+    QosData->arp = ogs_calloc(1, sizeof(OpenAPI_arp_t));
+    ogs_assert(QosData->arp);
+
+    if (session_qos->arp.pre_emption_capability == OGS_5GC_PRE_EMPTION_ENABLED)
+        QosData->arp->preempt_cap = OpenAPI_preemption_capability_MAY_PREEMPT;
+    else
+        QosData->arp->preempt_cap =
+            OpenAPI_preemption_capability_NOT_PREEMPT;
+
+    if (session_qos->arp.pre_emption_vulnerability ==
+            OGS_5GC_PRE_EMPTION_ENABLED)
+        QosData->arp->preempt_vuln =
+            OpenAPI_preemption_vulnerability_PREEMPTABLE;
+    else
+        QosData->arp->preempt_vuln =
+            OpenAPI_preemption_vulnerability_NOT_PREEMPTABLE;
+
+    QosData->arp->priority_level = session_qos->arp.priority_level;
+
+    if (has_mbr) {
+        if (mbr_dl > 0)
+            QosData->maxbr_dl = ogs_sbi_bitrate_to_string(
+                    mbr_dl, OGS_SBI_BITRATE_BPS);
+        if (mbr_ul > 0)
+            QosData->maxbr_ul = ogs_sbi_bitrate_to_string(
+                    mbr_ul, OGS_SBI_BITRATE_BPS);
+    }
+
+    if (has_gbr) {
+        if (gbr_dl > 0)
+            QosData->gbr_dl = ogs_sbi_bitrate_to_string(
+                    gbr_dl, OGS_SBI_BITRATE_BPS);
+        if (gbr_ul > 0)
+            QosData->gbr_ul = ogs_sbi_bitrate_to_string(
+                    gbr_ul, OGS_SBI_BITRATE_BPS);
+    }
+
+    return QosData;
+}
+
+static void pcf_policyauth_log_qos_target(
+        const char *event, pcf_ue_sm_t *pcf_ue_sm, pcf_sess_t *sess,
+        const char *af_app_id, uint8_t qfi, int five_qi,
+        uint64_t gbr_dl, uint64_t gbr_ul, uint64_t mbr_dl, uint64_t mbr_ul,
+        bool has_gbr, bool has_mbr)
+{
+    ogs_assert(event);
+    ogs_assert(pcf_ue_sm);
+    ogs_assert(sess);
+
+    if (af_app_id) {
+        ogs_info("[PolicyAuth-QoS] %s [%s:%d] afAppId=%s",
+                event, pcf_ue_sm->supi, sess->psi, af_app_id);
+    }
+
+    if (has_gbr || has_mbr) {
+        ogs_info("[PolicyAuth-QoS] %s [%s:%d] qfi=%d 5qi=%d"
+                " gbr_dl=%llu gbr_ul=%llu mbr_dl=%llu mbr_ul=%llu",
+                event, pcf_ue_sm->supi, sess->psi, qfi, five_qi,
+                (unsigned long long)gbr_dl, (unsigned long long)gbr_ul,
+                (unsigned long long)mbr_dl, (unsigned long long)mbr_ul);
+    } else {
+        ogs_info("[PolicyAuth-QoS] %s [%s:%d] qfi=%d 5qi=%d",
+                event, pcf_ue_sm->supi, sess->psi, qfi, five_qi);
+    }
+}
+
+static void pcf_policyauth_free_qos_target_decision(
+        OpenAPI_list_t *QosDecisionList)
+{
+    OpenAPI_lnode_t *node = NULL;
+    OpenAPI_map_t *QosDecisionMap = NULL;
+    OpenAPI_qos_data_t *QosData = NULL;
+
+    if (!QosDecisionList)
+        return;
+
+    OpenAPI_list_for_each(QosDecisionList, node) {
+        QosDecisionMap = node->data;
+        if (QosDecisionMap) {
+            QosData = QosDecisionMap->value;
+            if (QosData)
+                ogs_sbi_free_qos_data(QosData);
+            ogs_free(QosDecisionMap);
+        }
+    }
+    OpenAPI_list_free(QosDecisionList);
+}
+
+static bool pcf_policyauth_send_qos_target_notify(
+        pcf_sess_t *sess, pcf_ue_sm_t *pcf_ue_sm,
+        uint8_t qfi, int five_qi,
+        uint64_t gbr_dl, uint64_t gbr_ul, uint64_t mbr_dl, uint64_t mbr_ul,
+        bool has_gbr, bool has_mbr)
+{
+    int rv;
+    ogs_session_data_t session_data;
+    OpenAPI_sm_policy_decision_t SmPolicyDecision;
+    OpenAPI_list_t *QosDecisionList = NULL;
+    OpenAPI_map_t *QosDecisionMap = NULL;
+    OpenAPI_qos_data_t *QosData = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(pcf_ue_sm);
+
+    if (!sess->nsmf.client) {
+        ogs_error("[PolicyAuth-QoS] No SMF association [%s:%d]",
+                pcf_ue_sm->supi, sess->psi);
+        return false;
+    }
+
+    memset(&session_data, 0, sizeof(session_data));
+    rv = pcf_get_session_data(
+            pcf_ue_sm->supi,
+            sess->home.presence == true ? &sess->home.plmn_id : NULL,
+            &sess->s_nssai, sess->dnn, &session_data, 0);
+    if (rv != OGS_OK) {
+        ogs_error("[PolicyAuth-QoS] Cannot load session data [%s:%d]",
+                pcf_ue_sm->supi, sess->psi);
+        return false;
+    }
+
+    pcf_policyauth_log_qos_target("PCF->SMF notify", pcf_ue_sm, sess,
+            NULL, qfi, five_qi, gbr_dl, gbr_ul, mbr_dl, mbr_ul,
+            has_gbr, has_mbr);
+
+    memset(&SmPolicyDecision, 0, sizeof(SmPolicyDecision));
+
+    QosDecisionList = OpenAPI_list_create();
+    ogs_assert(QosDecisionList);
+
+    QosData = pcf_policyauth_build_qos_target_data(
+            qfi, five_qi, gbr_dl, gbr_ul, mbr_dl, mbr_ul,
+            has_gbr, has_mbr, &session_data.session.qos);
+    ogs_assert(QosData);
+
+    QosDecisionMap = OpenAPI_map_create(QosData->qos_id, QosData);
+    ogs_assert(QosDecisionMap);
+    OpenAPI_list_add(QosDecisionList, QosDecisionMap);
+
+    SmPolicyDecision.qos_decs = QosDecisionList;
+
+    if (!pcf_sbi_send_smpolicycontrol_update_notify(sess, &SmPolicyDecision)) {
+        ogs_error("[PolicyAuth-QoS] SmPolicyControl update notify failed");
+        pcf_policyauth_free_qos_target_decision(QosDecisionList);
+        OGS_SESSION_DATA_FREE(&session_data);
+        return false;
+    }
+
+    pcf_policyauth_free_qos_target_decision(QosDecisionList);
+    OGS_SESSION_DATA_FREE(&session_data);
+
+    ogs_info("[PolicyAuth-QoS] PCF notify SMF OK [%s:%d] qfi=%d 5qi=%d",
+            pcf_ue_sm->supi, sess->psi, qfi, five_qi);
+
+    return true;
+}
+
 bool pcf_npcf_am_policy_control_handle_create(pcf_ue_am_t *pcf_ue_am,
         ogs_sbi_stream_t *stream, ogs_sbi_message_t *message)
 {
@@ -701,6 +945,92 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
         goto cleanup;
     }
 
+    /*
+     * Lab QoS-target via standard Policy Authorization (afAppId 5GC-QOS:...)
+     */
+    if (AscReqData->af_app_id) {
+        uint8_t target_qfi = 0;
+        int target_5qi = 0;
+        uint64_t gbr_dl = 0, gbr_ul = 0, mbr_dl = 0, mbr_ul = 0;
+        bool has_gbr = false, has_mbr = false;
+
+        if (pcf_policyauth_parse_qos_target_af_app_id(
+                    AscReqData->af_app_id, &target_qfi, &target_5qi,
+                    &gbr_dl, &gbr_ul, &mbr_dl, &mbr_ul, &has_gbr, &has_mbr)) {
+
+            pcf_policyauth_log_qos_target("AF POST app-session", pcf_ue_sm, sess,
+                    AscReqData->af_app_id, target_qfi, target_5qi,
+                    gbr_dl, gbr_ul, mbr_dl, mbr_ul, has_gbr, has_mbr);
+
+            rc = ogs_sbi_getaddr_from_uri(&scheme, &fqdn, &fqdn_port,
+                    &addr, &addr6, AscReqData->notif_uri);
+            if (rc == false || scheme == OpenAPI_uri_scheme_NULL) {
+                strerror = ogs_msprintf("[%s:%d] Invalid URI [%s]",
+                        pcf_ue_sm->supi, sess->psi, AscReqData->notif_uri);
+                status = OGS_SBI_HTTP_STATUS_BAD_REQUEST;
+                goto cleanup;
+            }
+
+            app_session = pcf_app_add(sess);
+            ogs_assert(app_session);
+
+            if (app_session->notif_uri)
+                ogs_free(app_session->notif_uri);
+            app_session->notif_uri = ogs_strdup(AscReqData->notif_uri);
+            ogs_assert(app_session->notif_uri);
+
+            client = ogs_sbi_client_find(
+                    scheme, fqdn, fqdn_port, addr, addr6);
+            if (!client) {
+                client = ogs_sbi_client_add(
+                        scheme, fqdn, fqdn_port, addr, addr6);
+                if (!client) {
+                    strerror = ogs_msprintf(
+                            "%s: ogs_sbi_client_add() failed", OGS_FUNC);
+                    status = OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                    ogs_freeaddrinfo(addr);
+                    goto cleanup;
+                }
+            }
+            OGS_SBI_SETUP_CLIENT(&app_session->naf, client);
+
+            ogs_free(fqdn);
+            ogs_freeaddrinfo(addr);
+            ogs_freeaddrinfo(addr6);
+
+            if (!pcf_policyauth_send_qos_target_notify(
+                        sess, pcf_ue_sm, target_qfi, target_5qi,
+                        gbr_dl, gbr_ul, mbr_dl, mbr_ul, has_gbr, has_mbr)) {
+                strerror = ogs_msprintf("[%s:%d] QoS target notify failed",
+                        pcf_ue_sm->supi, sess->psi);
+                status = OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                goto cleanup;
+            }
+
+            memset(&sendmsg, 0, sizeof(sendmsg));
+            memset(&header, 0, sizeof(header));
+            header.service.name =
+                (char *)OGS_SBI_SERVICE_NAME_NPCF_POLICYAUTHORIZATION;
+            header.api.version = (char *)OGS_SBI_API_V1;
+            header.resource.component[0] =
+                (char *)OGS_SBI_RESOURCE_NAME_APP_SESSIONS;
+            header.resource.component[1] =
+                (char *)app_session->app_session_id;
+            sendmsg.http.location = ogs_sbi_server_uri(server, &header);
+            ogs_assert(sendmsg.http.location);
+
+            sendmsg.AppSessionContext = recvmsg->AppSessionContext;
+
+            response = ogs_sbi_build_response(
+                    &sendmsg, OGS_SBI_HTTP_STATUS_CREATED);
+            ogs_assert(response);
+            ogs_assert(true == ogs_sbi_server_send_response(stream, response));
+
+            ogs_free(sendmsg.http.location);
+            return true;
+        }
+    }
+
     if (!AscReqData->med_components) {
         strerror = ogs_msprintf("[%s:%d] No AscReqData->MediaCompoenent",
                 pcf_ue_sm->supi, sess->psi);
@@ -1194,6 +1524,35 @@ bool pcf_npcf_policyauthorization_handle_update(
         goto cleanup;
     }
 
+    if (AscUpdateData->af_app_id) {
+        uint8_t target_qfi = 0;
+        int target_5qi = 0;
+        uint64_t gbr_dl = 0, gbr_ul = 0, mbr_dl = 0, mbr_ul = 0;
+        bool has_gbr = false, has_mbr = false;
+
+        if (pcf_policyauth_parse_qos_target_af_app_id(
+                    AscUpdateData->af_app_id, &target_qfi, &target_5qi,
+                    &gbr_dl, &gbr_ul, &mbr_dl, &mbr_ul, &has_gbr, &has_mbr)) {
+
+            pcf_policyauth_log_qos_target("AF PATCH app-session", pcf_ue_sm, sess,
+                    AscUpdateData->af_app_id, target_qfi, target_5qi,
+                    gbr_dl, gbr_ul, mbr_dl, mbr_ul, has_gbr, has_mbr);
+
+            if (!pcf_policyauth_send_qos_target_notify(
+                        sess, pcf_ue_sm, target_qfi, target_5qi,
+                        gbr_dl, gbr_ul, mbr_dl, mbr_ul, has_gbr, has_mbr)) {
+                strerror = ogs_msprintf("[%s:%d] QoS target notify failed",
+                        pcf_ue_sm->supi, sess->psi);
+                status = OGS_SBI_HTTP_STATUS_INTERNAL_SERVER_ERROR;
+                goto cleanup;
+            }
+
+            ogs_assert(true ==
+                    ogs_sbi_send_http_status_no_content(stream));
+            return true;
+        }
+    }
+
     if (!AscUpdateData->med_components) {
         strerror = ogs_msprintf("[%s:%d] No AscUpdateData->MediaCompoenent",
                 pcf_ue_sm->supi, sess->psi);
@@ -1638,3 +1997,4 @@ bool pcf_npcf_policyauthorization_handle_delete(
 
     return true;
 }
+

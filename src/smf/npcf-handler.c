@@ -20,10 +20,200 @@
 #include "sbi-path.h"
 #include "pfcp-path.h"
 #include "nas-path.h"
+#include "gsm-handler.h"
+#include "ngap-path.h"
 #include "local-path.h"
 #include "binding.h"
 
 #include "npcf-handler.h"
+
+/* Matches PCF npcf-handler PolicyAuth QoS-target qos_id (qfi-N). */
+#define SMF_QOS_TARGET_QOS_ID_PREFIX    "qfi-"
+
+#define qos_flow_find_or_add(list, node, member)        \
+    do {                                                \
+        smf_bearer_t *iter = NULL;                      \
+        bool found = false;                             \
+                                                        \
+        ogs_assert(node);                               \
+                                                        \
+        ogs_list_for_each_entry(list, iter, member) {   \
+            if (iter->qfi == node->qfi) {               \
+                found = true;                           \
+                break;                                  \
+            }                                           \
+        }                                               \
+        if (found == false) {                           \
+            ogs_list_add(list, &node->member);          \
+        }                                               \
+    } while(0);
+
+static bool smf_policyauth_modify_qos_flow_by_qfi(
+        smf_sess_t *sess, smf_ue_t *smf_ue, uint8_t qfi, int five_qi,
+        uint64_t gbr_dl, uint64_t gbr_ul, uint64_t mbr_dl, uint64_t mbr_ul,
+        bool has_gbr, bool has_mbr)
+{
+    int rv;
+    smf_bearer_t *qos_flow = NULL;
+
+    ogs_assert(sess);
+    ogs_assert(smf_ue);
+
+    qos_flow = smf_qos_flow_find_by_qfi(sess, qfi);
+    if (!qos_flow) {
+        ogs_error("[PolicyAuth-QoS] QoS Flow not found [%s:%d:%d]",
+                smf_ue->supi, sess->psi, qfi);
+        return false;
+    }
+
+    if (has_gbr || has_mbr) {
+        ogs_info("[PolicyAuth-QoS] SMF apply [%s:%d:%d] 5QI=%d"
+                " gbr_dl=%llu gbr_ul=%llu mbr_dl=%llu mbr_ul=%llu",
+                smf_ue->supi, sess->psi, qfi, five_qi,
+                (unsigned long long)gbr_dl, (unsigned long long)gbr_ul,
+                (unsigned long long)mbr_dl, (unsigned long long)mbr_ul);
+    } else {
+        ogs_info("[PolicyAuth-QoS] SMF apply [%s:%d:%d] 5QI=%d",
+                smf_ue->supi, sess->psi, qfi, five_qi);
+    }
+
+    qos_flow->qos.index = five_qi;
+
+    if (has_gbr) {
+        if (gbr_dl > 0)
+            qos_flow->qos.gbr.downlink = gbr_dl;
+        if (gbr_ul > 0)
+            qos_flow->qos.gbr.uplink = gbr_ul;
+
+        if (!has_mbr) {
+            if (gbr_dl > 0 && qos_flow->qos.mbr.downlink == 0)
+                qos_flow->qos.mbr.downlink = gbr_dl;
+            if (gbr_ul > 0 && qos_flow->qos.mbr.uplink == 0)
+                qos_flow->qos.mbr.uplink = gbr_ul;
+        }
+    }
+
+    if (has_mbr) {
+        if (mbr_dl > 0)
+            qos_flow->qos.mbr.downlink = mbr_dl;
+        if (mbr_ul > 0)
+            qos_flow->qos.mbr.uplink = mbr_ul;
+    }
+
+    smf_bearer_qos_update(qos_flow);
+
+    ogs_list_init(&sess->qos_flow_to_modify_list);
+    qos_flow_find_or_add(&sess->qos_flow_to_modify_list,
+            qos_flow, to_modify_node);
+
+    rv = smf_5gc_pfcp_send_one_qos_flow_modification_request(
+            qos_flow, NULL,
+            OGS_PFCP_MODIFY_SESSION |
+                OGS_PFCP_MODIFY_NETWORK_REQUESTED |
+                OGS_PFCP_MODIFY_QOS_MODIFY,
+            0);
+    if (rv != OGS_OK) {
+        ogs_error("[PolicyAuth-QoS] PFCP modify failed [%s:%d:%d]",
+                smf_ue->supi, sess->psi, qfi);
+        return false;
+    }
+
+    if (sess->establishment_accept_sent == true) {
+        smf_n1_n2_message_transfer_param_t param;
+        memset(&param, 0, sizeof(param));
+        param.state = SMF_NETWORK_REQUESTED_QOS_FLOW_MODIFICATION;
+        param.n1smbuf = gsm_build_pdu_session_modification_command(sess, 0, 0);
+        if (!param.n1smbuf) {
+            ogs_error("[PolicyAuth-QoS] Failed to build PDU Session Modification");
+            return false;
+        }
+
+        param.n2smbuf = ngap_build_pdu_session_resource_modify_request_transfer(
+                sess, has_gbr && (gbr_dl > 0 || gbr_ul > 0));
+        if (!param.n2smbuf) {
+            ogs_error("[PolicyAuth-QoS] Failed to build NGAP Modify Request");
+            ogs_pkbuf_free(param.n1smbuf);
+            return false;
+        }
+
+        smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
+    }
+
+    ogs_info("[PolicyAuth-QoS] SMF QoS modified OK [%s:%d:%d] 5QI=%d"
+            " (PFCP%s%s)",
+            smf_ue->supi, sess->psi, qfi, five_qi,
+            " sent",
+            sess->establishment_accept_sent == true ? ", NGAP sent" : "");
+
+    return true;
+}
+
+static bool smf_policyauth_apply_qos_target_decision(
+        smf_sess_t *sess, smf_ue_t *smf_ue,
+        OpenAPI_sm_policy_decision_t *SmPolicyDecision)
+{
+    OpenAPI_lnode_t *node = NULL;
+    OpenAPI_map_t *QosDecisionMap = NULL;
+    OpenAPI_qos_data_t *QosData = NULL;
+    bool applied = false;
+
+    ogs_assert(sess);
+    ogs_assert(smf_ue);
+    ogs_assert(SmPolicyDecision);
+
+    if (!SmPolicyDecision->qos_decs || SmPolicyDecision->pcc_rules)
+        return false;
+
+    ogs_info("[PolicyAuth-QoS] SMF recv PCF qosDecs (qos-target) [%s:%d]",
+            smf_ue->supi, sess->psi);
+
+    OpenAPI_list_for_each(SmPolicyDecision->qos_decs, node) {
+        uint8_t qfi = 0;
+        uint64_t gbr_dl = 0, gbr_ul = 0, mbr_dl = 0, mbr_ul = 0;
+        bool has_gbr = false, has_mbr = false;
+
+        QosDecisionMap = node->data;
+        if (!QosDecisionMap || !QosDecisionMap->value)
+            continue;
+
+        QosData = QosDecisionMap->value;
+        if (!QosData->qos_id)
+            continue;
+
+        if (strncmp(QosData->qos_id, SMF_QOS_TARGET_QOS_ID_PREFIX,
+                    strlen(SMF_QOS_TARGET_QOS_ID_PREFIX)) != 0)
+            continue;
+
+        qfi = (uint8_t)atoi(QosData->qos_id +
+                strlen(SMF_QOS_TARGET_QOS_ID_PREFIX));
+        if (qfi == 0 || !QosData->is__5qi)
+            continue;
+
+        if (QosData->gbr_dl) {
+            gbr_dl = ogs_sbi_bitrate_from_string(QosData->gbr_dl);
+            has_gbr = true;
+        }
+        if (QosData->gbr_ul) {
+            gbr_ul = ogs_sbi_bitrate_from_string(QosData->gbr_ul);
+            has_gbr = true;
+        }
+        if (QosData->maxbr_dl) {
+            mbr_dl = ogs_sbi_bitrate_from_string(QosData->maxbr_dl);
+            has_mbr = true;
+        }
+        if (QosData->maxbr_ul) {
+            mbr_ul = ogs_sbi_bitrate_from_string(QosData->maxbr_ul);
+            has_mbr = true;
+        }
+
+        if (smf_policyauth_modify_qos_flow_by_qfi(
+                    sess, smf_ue, qfi, QosData->_5qi,
+                    gbr_dl, gbr_ul, mbr_dl, mbr_ul, has_gbr, has_mbr))
+            applied = true;
+    }
+
+    return applied;
+}
 
 static void update_authorized_pcc_rule_and_qos(
         smf_sess_t *sess, OpenAPI_sm_policy_decision_t *SmPolicyDecision)
@@ -746,6 +936,15 @@ bool smf_npcf_smpolicycontrol_handle_update_notify(
         goto cleanup;
     }
 
+    /* Policy Authorization QoS-target (qosDecs qfi-N only, from PCF notify) */
+    if (smf_policyauth_apply_qos_target_decision(
+                sess, smf_ue, SmPolicyDecision) == true) {
+        ogs_info("[PolicyAuth-QoS] SMF qos-target done [%s:%d]",
+                smf_ue->supi, sess->psi);
+        ogs_assert(true == ogs_sbi_send_http_status_no_content(stream));
+        return true;
+    }
+
     /* Update authorized PCC rule & QoS */
     update_authorized_pcc_rule_and_qos(sess, SmPolicyDecision);
 
@@ -786,3 +985,4 @@ bool smf_npcf_smpolicycontrol_handle_terminate_notify(
 
     return true;
 }
+
