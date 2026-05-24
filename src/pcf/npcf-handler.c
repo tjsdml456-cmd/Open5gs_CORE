@@ -17,6 +17,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <sys/time.h>
+
 #include "sbi-path.h"
 
 #include "npcf-handler.h"
@@ -34,6 +36,62 @@
  */
 #define PCF_QOS_TARGET_AF_PREFIX        "5GC-QOS:"
 #define PCF_QOS_TARGET_QOS_ID_PREFIX    "qfi-"
+
+/*
+ * Log when a Policy Authorization API request is first handled (POST/PATCH).
+ * Correlates with AF curl in iperf3_dynamic_5qi_pcf.sh (wall clock, local TZ).
+ */
+static void pcf_policyauth_log_api_ingress(
+        const char *method, pcf_sess_t *sess, pcf_ue_sm_t *pcf_ue_sm,
+        pcf_app_t *app_session, ogs_sbi_message_t *recvmsg, bool is_patch)
+{
+    struct timeval wall;
+    struct tm tm_local;
+    const char *af_app_id = NULL;
+    time_t sec;
+
+    ogs_assert(method);
+    ogs_assert(sess);
+    ogs_assert(recvmsg);
+
+    if (is_patch) {
+        if (recvmsg->AppSessionContextUpdateDataPatch &&
+                recvmsg->AppSessionContextUpdateDataPatch->asc_req_data)
+            af_app_id =
+                recvmsg->AppSessionContextUpdateDataPatch->asc_req_data->af_app_id;
+    } else if (recvmsg->AppSessionContext &&
+            recvmsg->AppSessionContext->asc_req_data) {
+        af_app_id = recvmsg->AppSessionContext->asc_req_data->af_app_id;
+    }
+
+    gettimeofday(&wall, NULL);
+    sec = wall.tv_sec;
+    localtime_r(&sec, &tm_local);
+
+    if (pcf_ue_sm && app_session && app_session->app_session_id) {
+        ogs_info("[PCF-API-INGRESS] %s wall=%02d:%02d:%02d.%06ld "
+                "afAppId=%s supi=%s psi=%d appSessionId=%s",
+                method,
+                tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec,
+                (long)wall.tv_usec,
+                af_app_id ? af_app_id : "-",
+                pcf_ue_sm->supi, sess->psi, app_session->app_session_id);
+    } else if (pcf_ue_sm) {
+        ogs_info("[PCF-API-INGRESS] %s wall=%02d:%02d:%02d.%06ld "
+                "afAppId=%s supi=%s psi=%d",
+                method,
+                tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec,
+                (long)wall.tv_usec,
+                af_app_id ? af_app_id : "-",
+                pcf_ue_sm->supi, sess->psi);
+    } else {
+        ogs_info("[PCF-API-INGRESS] %s wall=%02d:%02d:%02d.%06ld afAppId=%s",
+                method,
+                tm_local.tm_hour, tm_local.tm_min, tm_local.tm_sec,
+                (long)wall.tv_usec,
+                af_app_id ? af_app_id : "-");
+    }
+}
 
 static bool pcf_policyauth_parse_qos_target_af_app_id(
         const char *af_app_id, uint8_t *qfi, int *five_qi,
@@ -905,9 +963,14 @@ bool pcf_npcf_policyauthorization_handle_create(pcf_sess_t *sess,
     OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
     ogs_assert(sess);
-    pcf_ue_sm = pcf_ue_sm_find_by_id(sess->pcf_ue_sm_id);
     ogs_assert(stream);
     ogs_assert(recvmsg);
+
+    pcf_ue_sm = pcf_ue_sm_find_by_id(sess->pcf_ue_sm_id);
+    pcf_policyauth_log_api_ingress(
+            "POST", sess, pcf_ue_sm, NULL, recvmsg, false);
+
+    ogs_assert(pcf_ue_sm);
 
     server = ogs_sbi_server_from_stream(stream);
     ogs_assert(server);
@@ -1499,10 +1562,15 @@ bool pcf_npcf_policyauthorization_handle_update(
     OpenAPI_lnode_t *node = NULL, *node2 = NULL, *node3 = NULL;
 
     ogs_assert(sess);
-    pcf_ue_sm = pcf_ue_sm_find_by_id(sess->pcf_ue_sm_id);
     ogs_assert(app_session);
     ogs_assert(stream);
     ogs_assert(recvmsg);
+
+    pcf_ue_sm = pcf_ue_sm_find_by_id(sess->pcf_ue_sm_id);
+    pcf_policyauth_log_api_ingress(
+            "PATCH", sess, pcf_ue_sm, app_session, recvmsg, true);
+
+    ogs_assert(pcf_ue_sm);
 
     memset(&ims_data, 0, sizeof(ims_data));
     memset(&session_data, 0, sizeof(ogs_session_data_t));
