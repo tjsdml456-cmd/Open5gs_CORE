@@ -37,6 +37,20 @@
 #define PCF_QOS_TARGET_AF_PREFIX        "5GC-QOS:"
 #define PCF_QOS_TARGET_QOS_ID_PREFIX    "qfi-"
 
+/* TS 23.501 — only GBR / Delay-critical GBR 5QIs carry bitrates in PolicyAuth. */
+static bool pcf_policyauth_five_qi_needs_bitrate(int five_qi)
+{
+    switch (five_qi) {
+    case 1: case 2: case 3: case 4:
+    case 65: case 66: case 67:
+    case 75:
+    case 82: case 83: case 84: case 85:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /*
  * Log when a Policy Authorization API request is first handled (POST/PATCH).
  * Correlates with AF curl in iperf3_dynamic_5qi_pcf.sh (wall clock, local TZ).
@@ -139,6 +153,12 @@ static bool pcf_policyauth_parse_qos_target_af_app_id(
             *has_mbr = true;
     }
 
+    if (!pcf_policyauth_five_qi_needs_bitrate(*five_qi)) {
+        *has_gbr = false;
+        *has_mbr = false;
+        *gbr_dl = *gbr_ul = *mbr_dl = *mbr_ul = 0;
+    }
+
     return true;
 }
 
@@ -183,6 +203,12 @@ static OpenAPI_qos_data_t *pcf_policyauth_build_qos_target_data(
             OpenAPI_preemption_vulnerability_NOT_PREEMPTABLE;
 
     QosData->arp->priority_level = session_qos->arp.priority_level;
+
+    if (!pcf_policyauth_five_qi_needs_bitrate(five_qi)) {
+        has_gbr = false;
+        has_mbr = false;
+        gbr_dl = gbr_ul = mbr_dl = mbr_ul = 0;
+    }
 
     if (has_mbr) {
         if (mbr_dl > 0)

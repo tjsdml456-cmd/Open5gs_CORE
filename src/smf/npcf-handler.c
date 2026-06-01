@@ -30,6 +30,20 @@
 /* Matches PCF npcf-handler PolicyAuth QoS-target qos_id (qfi-N). */
 #define SMF_QOS_TARGET_QOS_ID_PREFIX    "qfi-"
 
+/* TS 23.501 — non-GBR / best-effort 5QIs must not carry GBR/MBR in core or RAN. */
+static bool smf_policyauth_five_qi_needs_bitrate(int five_qi)
+{
+    switch (five_qi) {
+    case 1: case 2: case 3: case 4:
+    case 65: case 66: case 67:
+    case 75:
+    case 82: case 83: case 84: case 85:
+        return true;
+    default:
+        return false;
+    }
+}
+
 #define qos_flow_find_or_add(list, node, member)        \
     do {                                                \
         smf_bearer_t *iter = NULL;                      \
@@ -58,6 +72,12 @@ static bool smf_policyauth_modify_qos_flow_by_qfi(
 
     ogs_assert(sess);
     ogs_assert(smf_ue);
+
+    if (!smf_policyauth_five_qi_needs_bitrate(five_qi)) {
+        has_gbr = false;
+        has_mbr = false;
+        gbr_dl = gbr_ul = mbr_dl = mbr_ul = 0;
+    }
 
     qos_flow = smf_qos_flow_find_by_qfi(sess, qfi);
     if (!qos_flow) {
@@ -91,6 +111,10 @@ static bool smf_policyauth_modify_qos_flow_by_qfi(
             if (gbr_ul > 0 && qos_flow->qos.mbr.uplink == 0)
                 qos_flow->qos.mbr.uplink = gbr_ul;
         }
+    } else {
+        /* PCF 5QI-only update (non-GBR): clear stale GBR so PFCP/NGAP are not tied to prior phase. */
+        qos_flow->qos.gbr.downlink = 0;
+        qos_flow->qos.gbr.uplink = 0;
     }
 
     if (has_mbr) {
@@ -98,6 +122,9 @@ static bool smf_policyauth_modify_qos_flow_by_qfi(
             qos_flow->qos.mbr.downlink = mbr_dl;
         if (mbr_ul > 0)
             qos_flow->qos.mbr.uplink = mbr_ul;
+    } else if (!has_gbr) {
+        qos_flow->qos.mbr.downlink = 0;
+        qos_flow->qos.mbr.uplink = 0;
     }
 
     smf_bearer_qos_update(qos_flow);
@@ -129,7 +156,8 @@ static bool smf_policyauth_modify_qos_flow_by_qfi(
         }
 
         param.n2smbuf = ngap_build_pdu_session_resource_modify_request_transfer(
-                sess, has_gbr && (gbr_dl > 0 || gbr_ul > 0));
+                sess, smf_policyauth_five_qi_needs_bitrate(five_qi) &&
+                has_gbr && (gbr_dl > 0 || gbr_ul > 0));
         if (!param.n2smbuf) {
             ogs_error("[PolicyAuth-QoS] Failed to build NGAP Modify Request");
             ogs_pkbuf_free(param.n1smbuf);
@@ -204,6 +232,12 @@ static bool smf_policyauth_apply_qos_target_decision(
         if (QosData->maxbr_ul) {
             mbr_ul = ogs_sbi_bitrate_from_string(QosData->maxbr_ul);
             has_mbr = true;
+        }
+
+        if (!smf_policyauth_five_qi_needs_bitrate(QosData->_5qi)) {
+            has_gbr = false;
+            has_mbr = false;
+            gbr_dl = gbr_ul = mbr_dl = mbr_ul = 0;
         }
 
         if (smf_policyauth_modify_qos_flow_by_qfi(

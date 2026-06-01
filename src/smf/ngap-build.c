@@ -19,6 +19,20 @@
 
 #include "ngap-build.h"
 
+/* TS 23.501 — only GBR / DC-GBR 5QIs include GBR QoS information in NGAP. */
+static bool smf_five_qi_needs_gbr_ie(int five_qi)
+{
+    switch (five_qi) {
+    case 1: case 2: case 3: case 4:
+    case 65: case 66: case 67:
+    case 75:
+    case 82: case 83: case 84: case 85:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /**
  * Fill common QoS flow level parameters: 5QI, ARP, and optional GBR/MBR.
  */
@@ -59,9 +73,9 @@ static void fill_qos_level_parameters(
             (unsigned long long)qos->mbr.downlink,
             (unsigned long long)qos->mbr.uplink);
 
-    /* Optional GBR/MBR Information */
-    /* For GBR QoS flows, include GBR information if at least one GBR value is present */
-    if (include_gbr && (qos->gbr.downlink > 0 || qos->gbr.uplink > 0)) {
+    /* Optional GBR/MBR Information — non-GBR / best-effort: never include bitrate IEs. */
+    if (include_gbr && smf_five_qi_needs_gbr_ie(qos->index) &&
+            (qos->gbr.downlink > 0 || qos->gbr.uplink > 0)) {
         NGAP_GBR_QosInformation_t *gBR_QosInformation =
             params->gBR_QosInformation = CALLOC(1, sizeof(*gBR_QosInformation));
         ogs_assert(gBR_QosInformation);
@@ -742,4 +756,5 @@ ogs_pkbuf_t *ngap_build_handover_command_transfer(smf_sess_t *sess)
 
     return ogs_asn_encode(&asn_DEF_NGAP_HandoverCommandTransfer, &message);
 }
+
 
