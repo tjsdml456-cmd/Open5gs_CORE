@@ -133,6 +133,14 @@ static bool smf_policyauth_modify_qos_flow_by_qfi(
     qos_flow_find_or_add(&sess->qos_flow_to_modify_list,
             qos_flow, to_modify_node);
 
+    /*
+     * Send PFCP only here. N1/N2 (NGAP QoS Flow Modify) is sent once from
+     * n4-handler on PFCP Session Modification Response
+     * (OGS_PFCP_MODIFY_NETWORK_REQUESTED | OGS_PFCP_MODIFY_QOS_MODIFY).
+     *
+     * Previously this path also called namf N1N2 immediately, which duplicated
+     * the n4-handler transfer → 1 PCF PATCH produced 2x QOS-RECONFIG-DONE.
+     */
     rv = smf_5gc_pfcp_send_one_qos_flow_modification_request(
             qos_flow, NULL,
             OGS_PFCP_MODIFY_SESSION |
@@ -145,33 +153,9 @@ static bool smf_policyauth_modify_qos_flow_by_qfi(
         return false;
     }
 
-    if (sess->establishment_accept_sent == true) {
-        smf_n1_n2_message_transfer_param_t param;
-        memset(&param, 0, sizeof(param));
-        param.state = SMF_NETWORK_REQUESTED_QOS_FLOW_MODIFICATION;
-        param.n1smbuf = gsm_build_pdu_session_modification_command(sess, 0, 0);
-        if (!param.n1smbuf) {
-            ogs_error("[PolicyAuth-QoS] Failed to build PDU Session Modification");
-            return false;
-        }
-
-        param.n2smbuf = ngap_build_pdu_session_resource_modify_request_transfer(
-                sess, smf_policyauth_five_qi_needs_bitrate(five_qi) &&
-                has_gbr && (gbr_dl > 0 || gbr_ul > 0));
-        if (!param.n2smbuf) {
-            ogs_error("[PolicyAuth-QoS] Failed to build NGAP Modify Request");
-            ogs_pkbuf_free(param.n1smbuf);
-            return false;
-        }
-
-        smf_namf_comm_send_n1_n2_message_transfer(sess, NULL, &param);
-    }
-
     ogs_info("[PolicyAuth-QoS] SMF QoS modified OK [%s:%d:%d] 5QI=%d"
-            " (PFCP%s%s)",
-            smf_ue->supi, sess->psi, qfi, five_qi,
-            " sent",
-            sess->establishment_accept_sent == true ? ", NGAP sent" : "");
+            " (PFCP sent; NGAP on PFCP response)",
+            smf_ue->supi, sess->psi, qfi, five_qi);
 
     return true;
 }
